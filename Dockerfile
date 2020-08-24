@@ -17,3 +17,7 @@ RUN pip install --upgrade pip
 RUN pip install -e .[tf,ccxt,stochastic,docs,tests]
 RUN pip install -r ./requirements.txt
 RUN pip install -r ./examples/requirements.txt
+
+RUN jupyter contrib nbextension install --user
+RUN jupyter nbextension install https://github.com/drillan/jupyter-black/archive/master.zip --user
+RUN jupyter nbextension enable jupyter-black-master/jupyter-black
