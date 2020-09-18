@@ -748,7 +748,7 @@ class MatplotlibTradingChart(BaseRenderer):
         _check_path(self._path)
         filename = _create_auto_file_name(self._filename_prefix, self._save_format)
         filename = os.path.join(self._path, filename)
-        self.plt.savefig(filename, format=self._save_format)
+        plt.savefig(filename, format=self._save_format)
 
     def reset(self) -> None:
         """Resets the renderer.
