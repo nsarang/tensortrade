@@ -594,7 +594,7 @@ class MatplotlibTradingChart(BaseRenderer):
 
         self._save_format = save_format
         self._path = path
-        self.filename_prefix = filename_prefix
+        self._filename_prefix = filename_prefix
 
         if self._save_format and self._path and not os.path.exists(path):
             os.mkdir(path)
