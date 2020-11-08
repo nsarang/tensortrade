@@ -27,7 +27,7 @@ from tensortrade.env.generic import (
     Observer,
     Stopper,
     Informer,
-    Renderer
+    Renderer,
 )
 
 
@@ -57,14 +57,16 @@ class TradingEnv(gym.Env, TimeIndexed):
     agent_id: str = None
     episode_id: str = None
 
-    def __init__(self,
-                 action_scheme: ActionScheme,
-                 reward_scheme: RewardScheme,
-                 observer: Observer,
-                 stopper: Stopper,
-                 informer: Informer,
-                 renderer: Renderer,
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        action_scheme: ActionScheme,
+        reward_scheme: RewardScheme,
+        observer: Observer,
+        stopper: Stopper,
+        informer: Informer,
+        renderer: Renderer,
+        **kwargs
+    ) -> None:
         super().__init__()
         self.clock = Clock()
 
@@ -81,13 +83,13 @@ class TradingEnv(gym.Env, TimeIndexed):
         self.action_space = action_scheme.action_space
         self.observation_space = observer.observation_space
 
-        self._enable_logger = kwargs.get('enable_logger', False)
+        self._enable_logger = kwargs.get("enable_logger", False)
         if self._enable_logger:
-            self.logger = logging.getLogger(kwargs.get('logger_name', __name__))
-            self.logger.setLevel(kwargs.get('log_level', logging.DEBUG))
+            self.logger = logging.getLogger(kwargs.get("logger_name", __name__))
+            self.logger.setLevel(kwargs.get("log_level", logging.DEBUG))
 
     @property
-    def components(self) -> 'Dict[str, Component]':
+    def components(self) -> "Dict[str, Component]":
         """The components of the environment. (`Dict[str,Component]`, read-only)"""
         return {
             "action_scheme": self.action_scheme,
@@ -95,10 +97,10 @@ class TradingEnv(gym.Env, TimeIndexed):
             "observer": self.observer,
             "stopper": self.stopper,
             "informer": self.informer,
-            "renderer": self.renderer
+            "renderer": self.renderer,
         }
 
-    def step(self, action: Any) -> 'Tuple[np.array, float, bool, dict]':
+    def step(self, action: Any) -> "Tuple[np.array, float, bool, dict]":
         """Makes on step through the environment.
 
         Parameters
@@ -129,7 +131,7 @@ class TradingEnv(gym.Env, TimeIndexed):
 
         return obs, reward, done, info
 
-    def reset(self) -> 'np.array':
+    def reset(self, soft=False) -> "np.array":
         """Resets the environment.
 
         Returns
@@ -140,9 +142,11 @@ class TradingEnv(gym.Env, TimeIndexed):
         self.episode_id = str(uuid.uuid4())
         self.clock.reset()
 
-        for c in self.components.values():
-            if hasattr(c, "reset"):
-                c.reset()
+        for name, comp in self.components.items():
+            if soft and name == "observer":
+                continue
+            if hasattr(comp, "reset"):
+                comp.reset()
 
         obs = self.observer.observe(self)
 
