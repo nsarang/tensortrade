@@ -131,7 +131,7 @@ class TradingEnv(gym.Env, TimeIndexed):
 
         return obs, reward, done, info
 
-    def reset(self, soft=False) -> "np.array":
+    def reset(self) -> "np.array":
         """Resets the environment.
 
         Returns
@@ -142,11 +142,9 @@ class TradingEnv(gym.Env, TimeIndexed):
         self.episode_id = str(uuid.uuid4())
         self.clock.reset()
 
-        for name, comp in self.components.items():
-            if soft and name == "observer":
-                continue
-            if hasattr(comp, "reset"):
-                comp.reset()
+        for c in self.components.values():
+            if hasattr(c, "reset"):
+                c.reset()
 
         obs = self.observer.observe(self)
 

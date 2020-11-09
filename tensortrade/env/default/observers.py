@@ -278,9 +278,10 @@ class TensorTradeObserver(Observer):
         """
         return self.feed.has_next()
 
-    def reset(self) -> None:
+    def reset(self, hard=False) -> None:
         """Resets the observer"""
         self.renderer_history = []
         self.history.reset()
-        self.feed.reset()
-        self.warmup()
+        if hard is self.has_next() is False:
+            self.feed.reset()
+            self.warmup()

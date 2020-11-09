@@ -8,6 +8,7 @@ import os
 
 from . import core
 from tensortrade.agents.utils.logx import EpochLogger
+
 # from tensortrade.agents.utils.mpi_pytorch import (
 #     setup_pytorch_for_mpi,
 #     sync_params,
@@ -25,6 +26,7 @@ from tensortrade.agents import Agent
 
 DIV_LINE_WIDTH = 80
 DEFAULT_DATA_DIR = "experiments"
+
 
 def setup_logger_kwargs(exp_name, seed=None, data_dir=None, datestamp=False):
     """
@@ -52,23 +54,21 @@ def setup_logger_kwargs(exp_name, seed=None, data_dir=None, datestamp=False):
     """
 
     # Make base path
-    ymd_time = time.strftime("%Y-%m-%d_") if datestamp else ''
-    relpath = ''.join([ymd_time, exp_name])
-    
+    ymd_time = time.strftime("%Y-%m-%d_") if datestamp else ""
+    relpath = "".join([ymd_time, exp_name])
+
     if seed is not None:
         # Make a seed-specific subfolder in the experiment directory.
         if datestamp:
             hms_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-            subfolder = ''.join([hms_time, '-', exp_name, '_s', str(seed)])
+            subfolder = "".join([hms_time, "-", exp_name, "_s", str(seed)])
         else:
-            subfolder = ''.join([exp_name, '_s', str(seed)])
+            subfolder = "".join([exp_name, "_s", str(seed)])
         relpath = os.path.join(relpath, subfolder)
 
     data_dir = data_dir or DEFAULT_DATA_DIR
-    logger_kwargs = dict(output_dir=os.path.join(data_dir, relpath), 
-                         exp_name=exp_name)
+    logger_kwargs = dict(output_dir=os.path.join(data_dir, relpath), exp_name=exp_name)
     return logger_kwargs
-
 
 
 class VPGBuffer:
@@ -78,9 +78,9 @@ class VPGBuffer:
     for calculating the advantages of state-action pairs.
     """
 
-    def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95):
+    def __init__(self, obs_dim, act_dim, size, device, gamma=0.99, lam=0.95):
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
-        self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
+        self.act_buf = np.zeros(size, dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.ret_buf = np.zeros(size, dtype=np.float32)
@@ -88,6 +88,7 @@ class VPGBuffer:
         self.logp_buf = np.zeros(size, dtype=np.float32)
         self.gamma, self.lam = gamma, lam
         self.ptr, self.path_start_idx, self.max_size = 0, 0, size
+        self.device = device
 
     def store(self, obs, act, rew, val, logp):
         """
@@ -148,10 +149,13 @@ class VPGBuffer:
             adv=self.adv_buf,
             logp=self.logp_buf,
         )
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in data.items()}
+        return {
+            k: torch.as_tensor(v, dtype=torch.float32).to(self.device)
+            for k, v in data.items()
+        }
 
 
-class VPG(Agent):
+class VPGAgent(Agent):
     """
     Vanilla Policy Gradient 
 
@@ -241,9 +245,9 @@ class VPG(Agent):
 
     def __init__(
         self,
-        exp_name,
         env_fn,
-        actor_critic=core.MLPActorCritic,
+        exp_name,
+        actor_critic=core.CNNActorCritic,
         ac_kwargs=dict(),
         seed=0,
         steps_per_epoch=4000,
@@ -281,8 +285,8 @@ class VPG(Agent):
 
         # Instantiate environment
         self.env = env_fn()
-        obs_dim = self.env.observation_space.shape
-        act_dim = self.env.action_space.shape
+        obs_dim = self.env.observation_space
+        act_dim = self.env.action_space
 
         # Create actor-critic module
         self.ac = actor_critic(obs_dim, act_dim, **ac_kwargs)
@@ -298,7 +302,14 @@ class VPG(Agent):
 
         # Set up experience buffer
         self.local_steps_per_epoch = int(steps_per_epoch)
-        self.buf = VPGBuffer(obs_dim, act_dim, self.local_steps_per_epoch, gamma, lam)
+        self.buf = VPGBuffer(
+            obs_dim.shape,
+            act_dim.n,
+            self.local_steps_per_epoch,
+            ac_kwargs.get("device", "cpu"),
+            gamma,
+            lam,
+        )
 
         self.env.agent_id = self.id
 
@@ -340,7 +351,7 @@ class VPG(Agent):
         # Value function learning
         for i in range(self.train_v_iters):
             self.vf_optimizer.zero_grad()
-            loss_v = self.compute_loss_v(data)
+            loss_v = self._compute_loss_v(data)
             loss_v.backward()
             # mpi_avg_grads(self.ac.v)  # average grads across MPI processes
             self.vf_optimizer.step()
@@ -371,10 +382,15 @@ class VPG(Agent):
 
         torch.save(self.ac.state_dict(), path + filename)
 
+    def get_action(self, obs):
+        return self.ac.step(torch.as_tensor(obs, dtype=torch.float32))
+
     def train(self, render_interval=100, save_path=None):
+        self.ac.train()
+
         # Set up optimizers for policy and value function
-        pi_optimizer = Adam(self.ac.pi.parameters(), lr=self.pi_lr)
-        vf_optimizer = Adam(self.ac.v.parameters(), lr=self.vf_lr)
+        self.pi_optimizer = Adam(self.ac.pi.parameters(), lr=self.pi_lr)
+        self.vf_optimizer = Adam(self.ac.v.parameters(), lr=self.vf_lr)
 
         # Set up model saving
         self.logger.setup_pytorch_saver(self.ac)
@@ -382,15 +398,22 @@ class VPG(Agent):
         # Prepare for interaction with environment
         start_time = time.time()
         o, ep_ret, ep_len = self.env.reset(), 0, 0
+        total_steps = 0
+
+        print("====      AGENT ID: {}      ====".format(self.id))
 
         # Main loop: collect experience in env and update/log each epoch
         for epoch in range(self.epochs):
             for t in range(self.local_steps_per_epoch):
-                a, v, logp = self.ac.step(torch.as_tensor(o, dtype=torch.float32))
+                a, v, logp = self.ac.step(
+                    torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
+                )
+                a, v, logp = [x.item() for x in [a, v, logp]]
 
                 next_o, r, d, _ = self.env.step(a)
                 ep_ret += r
                 ep_len += 1
+                total_steps += 1
 
                 # save and log
                 self.buf.store(o, a, r, v, logp)
@@ -403,30 +426,31 @@ class VPG(Agent):
                 terminal = d or timeout
                 epoch_ended = t == self.local_steps_per_epoch - 1
 
-                if render_interval is not None and ep_len % render_interval == 0:
-                    self.env.render(
-                        episode=epoch,
-                        max_episodes=self.epochs,
-                        max_steps=self.max_ep_len,
-                    )
-                self.env.save()
-
                 if terminal or epoch_ended:
-                    if epoch_ended and not (terminal):
-                        print(
-                            "Warning: trajectory cut off by epoch at %d steps."
-                            % ep_len,
-                            flush=True,
+                    if render_interval is not None and epoch % render_interval == 0:
+                        print("rendering")
+                        self.env.render(
+                            episode=epoch,
+                            max_episodes=self.epochs,
+                            max_steps=min(self.steps_per_epoch, self.max_ep_len),
                         )
+                        self.env.save()
+                    # if epoch_ended and not (terminal):
+                    #     print(
+                    #         "Warning: trajectory cut off by epoch at %d steps."
+                    #         % ep_len,
+                    #         flush=True,
+                    #     )
                     # if trajectory didn't reach terminal state, bootstrap value target
                     if timeout or epoch_ended:
-                        _, v, _ = self.ac.step(torch.as_tensor(o, dtype=torch.float32))
+                        _, v, _ = self.ac.step(
+                            torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
+                        )
+                        v = v.item()
                     else:
                         v = 0
                     self.buf.finish_path(v)
-                    if terminal:
-                        # only save EpRet / EpLen if trajectory finished
-                        self.logger.store(EpRet=ep_ret, EpLen=ep_len)
+                    self.logger.store(EpRet=ep_ret, EpLen=ep_len)
                     o, ep_ret, ep_len = self.env.reset(soft=True), 0, 0
 
             # Save model
@@ -436,7 +460,7 @@ class VPG(Agent):
                 self.save(save_path)
 
             # Perform VPG update!
-            self.update()
+            self._update()
 
             # Log info about epoch
             self.logger.log_tabular("Epoch", epoch)
