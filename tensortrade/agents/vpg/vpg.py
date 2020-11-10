@@ -344,6 +344,7 @@ class VPGAgent(Agent):
         # Train policy with a single step of gradient descent
         self.pi_optimizer.zero_grad()
         loss_pi, pi_info = self._compute_loss_pi(data)
+        print("P", loss_pi, pi_info)
         loss_pi.backward()
         # mpi_avg_grads(self.ac.pi)  # average grads across MPI processes
         self.pi_optimizer.step()
@@ -352,6 +353,7 @@ class VPGAgent(Agent):
         for i in range(self.train_v_iters):
             self.vf_optimizer.zero_grad()
             loss_v = self._compute_loss_v(data)
+            print("V", loss_v)
             loss_v.backward()
             # mpi_avg_grads(self.ac.v)  # average grads across MPI processes
             self.vf_optimizer.step()
@@ -401,16 +403,24 @@ class VPGAgent(Agent):
         total_steps = 0
 
         print("====      AGENT ID: {}      ====".format(self.id))
+        from collections import defaultdict
+        results = []
+
 
         # Main loop: collect experience in env and update/log each epoch
         for epoch in range(self.epochs):
+            epoch_results = defaultdict(list)
             for t in range(self.local_steps_per_epoch):
                 a, v, logp = self.ac.step(
                     torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
                 )
                 a, v, logp = [x.item() for x in [a, v, logp]]
+                epoch_results["actions"].append(a)
+                epoch_results["value_est"].append(v)
+                epoch_results["logp"].append(logp)
 
                 next_o, r, d, _ = self.env.step(a)
+                epoch_results["rewards"].append(r)
                 ep_ret += r
                 ep_len += 1
                 total_steps += 1
@@ -427,8 +437,11 @@ class VPGAgent(Agent):
                 epoch_ended = t == self.local_steps_per_epoch - 1
 
                 if terminal or epoch_ended:
+                    from copy import deepcopy
+                    epoch_results["perf"] = deepcopy(self.env.action_scheme.portfolio.performance)
+                    epoch_results["ach_sch"] = deepcopy(self.env.action_scheme)
+
                     if render_interval is not None and epoch % render_interval == 0:
-                        print("rendering")
                         self.env.render(
                             episode=epoch,
                             max_episodes=self.epochs,
@@ -451,7 +464,7 @@ class VPGAgent(Agent):
                         v = 0
                     self.buf.finish_path(v)
                     self.logger.store(EpRet=ep_ret, EpLen=ep_len)
-                    o, ep_ret, ep_len = self.env.reset(soft=True), 0, 0
+                    o, ep_ret, ep_len = self.env.reset(), 0, 0
 
             # Save model
             if save_path and (
@@ -478,3 +491,6 @@ class VPGAgent(Agent):
             self.logger.log_tabular("KL", average_only=True)
             self.logger.log_tabular("Time", time.time() - start_time)
             self.logger.dump_tabular()
+
+            results.append(epoch_results)
+        return results
